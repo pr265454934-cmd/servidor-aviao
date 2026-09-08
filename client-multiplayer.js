@@ -1,5 +1,5 @@
 /**
- * client-multiplayer.js — Camada de multiplayer, loja e painel de ADM
+ * client-multiplayer .js — Camada de multiplayer, loja e painel de ADM
  * ---------------------------------------------------------------------------
  * Carregado DEPOIS do script principal do flight-simulator.html (por isso
  * consegue enxergar diretamente `scene`, `plane`, `camera`, `flight`,
