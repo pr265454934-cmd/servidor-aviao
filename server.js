@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 
 const ADMIN_NAME = 'paulodmf123';
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'paulorobson22/05/2026'; // <-- troque por uma chave só sua
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'troque-esta-chave-2026'; // <-- troque por uma chave só sua
 const BLOCKED_SUBSTRING = 'dmf';
 const PLANE_PRICES = { jato2: 200, jato3: 200, jato4: 200 };
 const LANDING_COOLDOWN_MS = 5000;   // anti-exploit: evita farm de moedas repetindo o evento "pousei"
@@ -148,13 +148,17 @@ function handleLogin(ws, msg) {
   }
 
   // Admin por chave secreta: não importa o IP nem quem chegou primeiro — só
-  // quem digitar a ADMIN_SECRET certa junto do nome vira paulodmf123.
+  // quem digitar a ADMIN_SECRET certa junto do nome vira paulodmf123. Se já
+  // havia uma sessão de admin "presa" (aba fechada sem avisar o servidor,
+  // por exemplo), a chave certa também serve pra assumir a sessão de novo —
+  // ela já prova que é o mesmo administrador, então não faz sentido travar.
   if (isClaimingAdminName) {
     if (msg.adminKey !== ADMIN_SECRET) {
       return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
     }
-    if (adminSocket) {
-      return safeSend(ws, { type: 'loginError', reason: 'O administrador já está conectado em outra sessão.' });
+    if (adminSocket && adminSocket !== ws) {
+      try { adminSocket.close(); } catch (e) {}
+      players.delete(adminSocket);
     }
     adminSocket = ws;
     ws.__isAdmin = true;
