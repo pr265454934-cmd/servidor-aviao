@@ -4,15 +4,11 @@
  * Requer: npm install ws
  * Rodar:  node server.js
  *
- * ATENÇÃO (leia antes de colocar isso na internet):
- * A regra "o primeiro que conectar vira administrador" NÃO é autenticação de
- * verdade — é apenas uma convenção de ordem de chegada. Qualquer pessoa que
- * conecte no servidor antes de você vira 'paulodmf123' com poder total sobre
- * os outros jogadores. Isso é seguro apenas se VOCÊ SEMPRE for a primeira
- * conexão logo após ligar o servidor (por exemplo, testando localmente antes
- * de divulgar o link). Deixei pronta, comentada logo abaixo, uma alternativa
- * mais segura baseada em uma chave secreta (ADMIN_SECRET) — recomendo migrar
- * para ela assim que possível.
+ * O admin (paulodmf123) só é reconhecido se digitar, junto do nome, a chave
+ * secreta ADMIN_SECRET definida abaixo. Troque essa chave por uma só sua
+ * antes de divulgar o link do jogo — quem souber a chave vira administrador.
+ * Prefira configurar ADMIN_SECRET como variável de ambiente no Render
+ * (Settings > Environment) em vez de deixá-la fixa no código, se puder.
  * ---------------------------------------------------------------------------
  */
 
@@ -23,27 +19,17 @@ const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 
 const ADMIN_NAME = 'paulodmf123';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'PAULO ROBSON 22/05/2026'; // <-- troque por uma chave só sua
 const BLOCKED_SUBSTRING = 'dmf';
 const PLANE_PRICES = { jato2: 200, jato3: 200, jato4: 200 };
 const LANDING_COOLDOWN_MS = 5000;   // anti-exploit: evita farm de moedas repetindo o evento "pousei"
 const MAX_MESSAGE_BYTES = 4000;     // anti-exploit: descarta pacotes anormalmente grandes
 const STATE_RATE_LIMIT_MS = 40;     // ~25 atualizações de posição por segundo, no máximo
 
-// -----------------------------------------------------------------------
-// ALTERNATIVA MAIS SEGURA (desativada por padrão) — descomente para usar
-// uma chave secreta em vez da regra "primeiro a chegar":
-//
-// const ADMIN_SECRET = process.env.ADMIN_SECRET || null;
-// // No handleLogin, em vez de "if (!adminAssigned)", use:
-// // if (ADMIN_SECRET && msg.adminKey === ADMIN_SECRET) { ...vira admin... }
-// -----------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // ESTADO DO SERVIDOR (tudo em memória — reinicia zerado a cada "node server.js")
 // ---------------------------------------------------------------------------
 let adminSocket = null;      // referência REAL da conexão do admin — nunca confiar em dado vindo do cliente
-let adminAssigned = false;   // true assim que o primeiro jogador se conecta
-let adminIp = null;          // IP salvo da primeira conexão — usado pra deixar o admin VOLTAR a entrar depois de sair
 let maintenanceMode = false;
 
 const players = new Map();       // ws -> { id, name, role, coins, planesOwned, ip, lastLanding, lastState }
@@ -142,7 +128,7 @@ wss.on('connection', (ws, req) => {
 });
 
 // ---------------------------------------------------------------------------
-// LOGIN — nome obrigatório, regra do primeiro a chegar, filtro de sigla,
+// LOGIN — nome obrigatório, chave secreta do admin, filtro de sigla,
 // modo manutenção e checagem de nomes duplicados
 // ---------------------------------------------------------------------------
 function handleLogin(ws, msg) {
@@ -161,26 +147,18 @@ function handleLogin(ws, msg) {
     return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
   }
 
-  // Regra do primeiro a chegar: a primeiríssima conexão do servidor vira o admin
-  if (!adminAssigned) {
-    adminAssigned = true;
+  // Admin por chave secreta: não importa o IP nem quem chegou primeiro — só
+  // quem digitar a ADMIN_SECRET certa junto do nome vira paulodmf123.
+  if (isClaimingAdminName) {
+    if (msg.adminKey !== ADMIN_SECRET) {
+      return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
+    }
+    if (adminSocket) {
+      return safeSend(ws, { type: 'loginError', reason: 'O administrador já está conectado em outra sessão.' });
+    }
     adminSocket = ws;
-    adminIp = ws.__ip;
     ws.__isAdmin = true;
     return finishLogin(ws, ADMIN_NAME, 'admin');
-  }
-
-  // Depois que o posto já foi ocupado: só quem já foi o admin (mesmo IP salvo
-  // acima) pode voltar a logar como paulodmf123 — e só se ele não estiver
-  // conectado em outra aba/sessão no momento. Qualquer outra pessoa/IP é
-  // rejeitada, mesmo que digite o nome certinho.
-  if (isClaimingAdminName) {
-    if (!adminSocket && ws.__ip === adminIp) {
-      adminSocket = ws;
-      ws.__isAdmin = true;
-      return finishLogin(ws, ADMIN_NAME, 'admin');
-    }
-    return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
   }
 
   if (maintenanceMode) {
@@ -240,7 +218,7 @@ function handleLanded(ws) {
   const p = players.get(ws);
   if (!p) return;
   const now = Date.now();
-  if (now - p.lastLanding < LANDING_COOLDOWN_MS) return;
+  if (now - p.lastLanding < LANDING_COOLDOWN_MS) return; // anti-exploit: farm de moedas
   p.lastLanding = now;
 
   if (p.role !== 'admin') p.coins += 10;
@@ -355,4 +333,4 @@ function handleAdminCommand(ws, msg) {
 }
 
 console.log(`Servidor do simulador de voo rodando na porta ${PORT}`);
-console.log('Aguardando a primeira conexão, que virá a ser o Administrador Supremo (paulodmf123)...');
+console.log('Admin protegido por chave secreta — use o nome paulodmf123 + a ADMIN_SECRET configurada.');
