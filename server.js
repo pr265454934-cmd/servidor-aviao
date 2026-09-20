@@ -43,6 +43,7 @@ const STATE_RATE_LIMIT_MS = 40;     // ~25 atualizações de posição por segun
 // ---------------------------------------------------------------------------
 let adminSocket = null;      // referência REAL da conexão do admin — nunca confiar em dado vindo do cliente
 let adminAssigned = false;   // true assim que o primeiro jogador se conecta
+let adminIp = null;          // IP salvo da primeira conexão — usado pra deixar o admin VOLTAR a entrar depois de sair
 let maintenanceMode = false;
 
 const players = new Map();       // ws -> { id, name, role, coins, planesOwned, ip, lastLanding, lastState }
@@ -164,12 +165,21 @@ function handleLogin(ws, msg) {
   if (!adminAssigned) {
     adminAssigned = true;
     adminSocket = ws;
+    adminIp = ws.__ip;
     ws.__isAdmin = true;
     return finishLogin(ws, ADMIN_NAME, 'admin');
   }
 
-  // Depois que o posto já foi ocupado, ninguém mais pode logar como paulodmf123
+  // Depois que o posto já foi ocupado: só quem já foi o admin (mesmo IP salvo
+  // acima) pode voltar a logar como paulodmf123 — e só se ele não estiver
+  // conectado em outra aba/sessão no momento. Qualquer outra pessoa/IP é
+  // rejeitada, mesmo que digite o nome certinho.
   if (isClaimingAdminName) {
+    if (!adminSocket && ws.__ip === adminIp) {
+      adminSocket = ws;
+      ws.__isAdmin = true;
+      return finishLogin(ws, ADMIN_NAME, 'admin');
+    }
     return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
   }
 
@@ -219,7 +229,6 @@ function handleState(ws, msg) {
   if (now - ws.__lastStateAt < STATE_RATE_LIMIT_MS) return; // anti-flood
   ws.__lastStateAt = now;
 
-  // Validação básica de sanidade dos números recebidos (anti-exploit)
   const { x, y, z, qx, qy, qz, qw } = msg;
   const nums = [x, y, z, qx, qy, qz, qw];
   if (nums.some((n) => typeof n !== 'number' || !isFinite(n))) return;
@@ -231,7 +240,7 @@ function handleLanded(ws) {
   const p = players.get(ws);
   if (!p) return;
   const now = Date.now();
-  if (now - p.lastLanding < LANDING_COOLDOWN_MS) return; // anti-exploit: farm de moedas
+  if (now - p.lastLanding < LANDING_COOLDOWN_MS) return;
   p.lastLanding = now;
 
   if (p.role !== 'admin') p.coins += 10;
@@ -261,7 +270,6 @@ function handleExplosion(ws, msg) {
   if (!p) return;
   const { x, y, z } = msg;
   if ([x, y, z].some((n) => typeof n !== 'number' || !isFinite(n))) return;
-  // Retransmite para todo mundo ver a megaexplosão sincronizada
   broadcast({ type: 'remoteExplosion', x, y, z, by: p.name });
 }
 
@@ -278,12 +286,9 @@ function handleChat(ws, msg) {
 
 // ---------------------------------------------------------------------------
 // PAINEL DE ADM — só executa se vier EXATAMENTE do socket salvo do admin.
-// Isso é o "anti-script de interface": nenhum dado enviado pelo cliente
-// (nome, id, flag "sou admin") é usado para decidir permissão — só a própria
-// referência de conexão TCP/WebSocket que já validamos no login.
 // ---------------------------------------------------------------------------
 function handleAdminCommand(ws, msg) {
-  if (ws !== adminSocket || !ws.__isAdmin) return; // rejeita qualquer tentativa de injeção client-side
+  if (ws !== adminSocket || !ws.__isAdmin) return;
 
   const targetWs = msg.targetId ? findWsById(msg.targetId) : null;
   const target = targetWs ? players.get(targetWs) : null;
@@ -339,8 +344,8 @@ function handleAdminCommand(ws, msg) {
       setTimeout(() => {
         for (const client of wss.clients) { try { client.terminate(); } catch (e) {} }
         process.exit(0);
-      }, 600); // pequena folga para o aviso chegar antes da queda do processo
-      return; // não precisa reenviar playerList, o processo já vai cair
+      }, 600);
+      return;
 
     default:
       return;
