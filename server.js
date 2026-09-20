@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
 
 const ADMIN_NAME = 'paulodmf123';
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'PAULO ROBSON 22/05/2026'; // <-- troque por uma chave só sua
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'paulorobson22/05/2026'; // <-- troque por uma chave só sua
 const BLOCKED_SUBSTRING = 'dmf';
 const PLANE_PRICES = { jato2: 200, jato3: 200, jato4: 200 };
 const LANDING_COOLDOWN_MS = 5000;   // anti-exploit: evita farm de moedas repetindo o evento "pousei"
