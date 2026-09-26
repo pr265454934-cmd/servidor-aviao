@@ -29,6 +29,26 @@ const PLANE_PRICES = { jato2: 200, jato3: 200, jato4: 200 };
 const LANDING_COOLDOWN_MS = 5000;   // anti-exploit: evita farm de moedas repetindo o evento "pousei"
 const MAX_MESSAGE_BYTES = 4000;     // anti-exploit: descarta pacotes anormalmente grandes
 const STATE_RATE_LIMIT_MS = 40;     // ~25 atualizações de posição por segundo, no máximo
+const DEVICE_SWITCH_WINDOW_MS = 10 * 60 * 1000; // a autorização de trocar de dispositivo dura 10 minutos
+
+// Normaliza texto pra comparar sem se importar com maiúscula/minúscula,
+// acentos, pontuação ou espaços extras — assim um pequeno erro de digitação
+// na frase de recuperação não trava o admin de verdade.
+function normalizePhrase(s) {
+  return (s || '')
+    .toString()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .toLowerCase()
+    .replace(/[.,]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Frase de recuperação de admin — usada só pra reconhecer o admin num
+// dispositivo NOVO, e só depois de autorizado no painel (veja armDeviceSwitch).
+const ADMIN_RECOVERY_PHRASE = normalizePhrase(
+  'SÃO PODERES DA UNIÃO, INDEPENDENTES E HARMÔNICOS ENTRE SI, O LEGISLATIVO, O EXECUTIVO E O JUDICIÁRIO ###555###0026092014'
+);
 
 // ---------------------------------------------------------------------------
 // ESTADO DO SERVIDOR (tudo em memória — reinicia zerado a cada "node server.js")
@@ -36,11 +56,14 @@ const STATE_RATE_LIMIT_MS = 40;     // ~25 atualizações de posição por segun
 let adminSocket = null;      // referência REAL da conexão do admin — nunca confiar em dado vindo do cliente
 let adminAssigned = false;   // true assim que alguém reivindica paulodmf123 pela primeira vez
 let adminToken = null;       // código gerado sozinho pelo servidor nessa hora — guardado pelo navegador do admin
+let deviceSwitchArmed = false;   // true só depois que o admin autorizar a troca de dispositivo no painel
+let deviceSwitchArmedAt = 0;
 let maintenanceMode = false;
 
 const players = new Map();       // ws -> { id, name, role, coins, planesOwned, ip, lastLanding, lastState }
 const bannedByIp = new Map();    // ip -> { until: timestamp|null }  (null = permanente)
 const mutedIds = new Set();      // ids silenciados
+const knownNames = new Map();    // nomeMinúsculo -> { name, role, online } — "existe" enquanto o servidor não reiniciar
 
 function makeId() {
   return crypto.randomBytes(8).toString('hex');
@@ -112,6 +135,8 @@ wss.on('connection', (ws, req) => {
 
     switch (msg.type) {
       case 'login':         return handleLogin(ws, msg);
+      case 'adminRecover':  return handleAdminRecover(ws, msg);
+      case 'checkPlayer':   return handleCheckPlayer(ws, msg);
       case 'state':         return handleState(ws, msg);
       case 'landed':        return handleLanded(ws);
       case 'buyPlane':      return handleBuyPlane(ws, msg);
@@ -126,6 +151,8 @@ wss.on('connection', (ws, req) => {
     const p = players.get(ws);
     if (p) {
       players.delete(ws);
+      const known = knownNames.get(p.name.toLowerCase());
+      if (known) known.online = false;
       broadcast({ type: 'playerLeft', id: p.id });
       broadcast({ type: 'playerList', players: publicPlayerList() });
       if (ws === adminSocket) adminSocket = null; // admin caiu; ninguém mais assume o posto
@@ -196,6 +223,52 @@ function handleLogin(ws, msg) {
   finishLogin(ws, rawName, 'player');
 }
 
+// ---------------------------------------------------------------------------
+// RECUPERAÇÃO DE ADMIN POR FRASE — só funciona se o admin autorizou a troca
+// de dispositivo antes (pelo painel), e só reconhece a frase exata (o Artigo
+// 2 da Constituição + o código pessoal). Uso único: some depois de usada.
+// ---------------------------------------------------------------------------
+function handleAdminRecover(ws, msg) {
+  const now = Date.now();
+  if (!deviceSwitchArmed || now - deviceSwitchArmedAt > DEVICE_SWITCH_WINDOW_MS) {
+    deviceSwitchArmed = false;
+    return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
+  }
+  if (normalizePhrase(msg.phrase) !== ADMIN_RECOVERY_PHRASE) {
+    return safeSend(ws, { type: 'loginError', reason: 'Nome inválido ou indisponível. Por favor, escolha outro nome.' });
+  }
+
+  deviceSwitchArmed = false; // uso único, por segurança
+  if (adminSocket && adminSocket !== ws) {
+    try { adminSocket.close(); } catch (e) {}
+    players.delete(adminSocket);
+  }
+  adminAssigned = true;
+  adminSocket = ws;
+  ws.__isAdmin = true;
+  finishLogin(ws, ADMIN_NAME, 'admin');
+}
+
+// ---------------------------------------------------------------------------
+// VERIFICA SE UM JOGADOR EXISTE (pro sistema de amigos) — "existe" quer dizer
+// que esse nome já entrou no servidor desde a última vez que ele reiniciou.
+// ---------------------------------------------------------------------------
+function handleCheckPlayer(ws, msg) {
+  const nameLower = (msg.name || '').toString().trim().toLowerCase();
+  if (!nameLower) return;
+  const entry = knownNames.get(nameLower);
+  if (!entry) {
+    return safeSend(ws, { type: 'checkPlayerResult', name: msg.name, exists: false });
+  }
+  safeSend(ws, {
+    type: 'checkPlayerResult',
+    name: entry.name,
+    exists: true,
+    online: entry.online,
+    role: entry.role
+  });
+}
+
 function finishLogin(ws, name, role) {
   const id = makeId();
   const player = {
@@ -206,6 +279,7 @@ function finishLogin(ws, name, role) {
     lastLanding: 0
   };
   players.set(ws, player);
+  knownNames.set(name.toLowerCase(), { name, role, online: true });
 
   safeSend(ws, {
     type: 'loginOk',
@@ -214,7 +288,7 @@ function finishLogin(ws, name, role) {
     coins: player.coins,
     planesOwned: player.planesOwned,
     maintenanceMode,
-    adminToken: role === 'admin' ? adminToken : undefined // o navegador guarda isso sozinho, sem o usuário digitar nada
+    adminToken: role === 'admin' ? adminToken : undefined
   });
   broadcast({ type: 'playerJoined', id, name }, ws);
   broadcast({ type: 'playerList', players: publicPlayerList() });
@@ -287,12 +361,9 @@ function handleChat(ws, msg) {
 
 // ---------------------------------------------------------------------------
 // PAINEL DE ADM — só executa se vier EXATAMENTE do socket salvo do admin.
-// Isso é o "anti-script de interface": nenhum dado enviado pelo cliente
-// (nome, id, flag "sou admin") é usado para decidir permissão — só a própria
-// referência de conexão TCP/WebSocket que já validamos no login.
 // ---------------------------------------------------------------------------
 function handleAdminCommand(ws, msg) {
-  if (ws !== adminSocket || !ws.__isAdmin) return; // rejeita qualquer tentativa de injeção client-side
+  if (ws !== adminSocket || !ws.__isAdmin) return;
 
   const targetWs = msg.targetId ? findWsById(msg.targetId) : null;
   const target = targetWs ? players.get(targetWs) : null;
@@ -343,13 +414,19 @@ function handleAdminCommand(ws, msg) {
       });
       break;
 
+    case 'armDeviceSwitch':
+      deviceSwitchArmed = true;
+      deviceSwitchArmedAt = Date.now();
+      safeSend(ws, { type: 'serverNotice', text: 'Troca de dispositivo autorizada por 10 minutos.' });
+      break;
+
     case 'shutdown':
       broadcast({ type: 'serverNotice', text: 'Servidor sendo encerrado pelo Administrador' });
       setTimeout(() => {
         for (const client of wss.clients) { try { client.terminate(); } catch (e) {} }
         process.exit(0);
-      }, 600); // pequena folga para o aviso chegar antes da queda do processo
-      return; // não precisa reenviar playerList, o processo já vai cair
+      }, 600);
+      return;
 
     default:
       return;
